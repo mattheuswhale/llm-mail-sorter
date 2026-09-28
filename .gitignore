@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.secrets/
+credentials.json
+output/
+.models/
+.pytest_cache/
+*.bak

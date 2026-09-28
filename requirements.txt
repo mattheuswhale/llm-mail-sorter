@@ -1,0 +1,9 @@
+# Install the correct PyTorch build for your machine separately first.
+# For NVIDIA, use a CUDA-enabled PyTorch wheel from https://pytorch.org/get-started/locally/
+
+google-api-python-client>=2.0
+google-auth>=2.0
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
+huggingface-hub>=0.30
+transformers>=4.51.0
