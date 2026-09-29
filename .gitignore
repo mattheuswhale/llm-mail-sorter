@@ -5,5 +5,6 @@ __pycache__/
 credentials.json
 output/
 .models/
+models/
 .pytest_cache/
 *.bak

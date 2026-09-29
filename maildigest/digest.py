@@ -81,15 +81,30 @@ def json_document(items: list[DigestItem]) -> dict[str, Any]:
     }
 
 
-def markdown_digest(items: list[DigestItem]) -> str:
+def markdown_digest(
+    items: list[DigestItem],
+    *,
+    mark_read_requested: bool = False,
+) -> str:
     groups = {p: [] for p in ("urgent", "high", "normal", "low")}
     for item in items:
         groups.setdefault(item.priority, []).append(item)
 
+    if mark_read_requested:
+        status_line = (
+            "> This run was configured to mark processed messages as read after "
+            "the local archive was written. No other mailbox changes are performed."
+        )
+    else:
+        status_line = (
+            "> Read-only report. No message was marked read, labeled, archived, "
+            "deleted, replied to, or otherwise modified."
+        )
+
     lines = [
         "# Unread Gmail Digest",
         "",
-        "> Read-only report. No message was marked read, labeled, archived, deleted, replied to, or otherwise modified.",
+        status_line,
         "",
     ]
 
