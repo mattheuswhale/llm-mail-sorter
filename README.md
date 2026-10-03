@@ -207,10 +207,23 @@ does not accidentally replace your CUDA PyTorch with a CPU build.
 
 ## Google setup
 
-1. Enable Gmail API in a Google Cloud project.
-2. Configure OAuth consent.
-3. Create a Desktop-app OAuth client.
-4. Put the downloaded client file at `credentials.json`.
+- Go to the Google Cloud Console and create a new project, or select an existing one.
+- Open APIs & Services → Library, search for Gmail API, and enable it. Google for Developers
+- Go to Google Auth Platform → Branding and configure the OAuth consent screen:
+  - set an app name
+  - choose a support email
+  - choose the appropriate audience
+  - provide a contact email
+  - finish the setup Google for Developers
+- Go to Google Auth Platform → Clients and click Create Client.
+- Select Desktop app as the application type, give it a name, and create it. Google for Developers
+- Download the generated OAuth client JSON file.
+- Rename it to:credentials.json
+- Place credentials.json in the root of the MailSort project, next to run.py.
+- On the first run, MailSort will open a browser window asking you to authorize Gmail access.
+- Normal runs request the read-only Gmail scope. If you use --mark-read, MailSort performs a separate authorization using the broader gmail.modify scope. Gmail access scopes determine what the application is allowed to do with your mailbox. Google for Developers
+- Google stores the authorization result locally in the .secrets/ directory, so you normally only need to approve access once.
+For a personal/testing project, keeping the OAuth app in testing mode is usually sufficient.
 
 Normal runs request only `gmail.readonly`.
 
