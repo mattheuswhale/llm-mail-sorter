@@ -61,3 +61,48 @@ class ModelIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayaModelStoreTests(unittest.TestCase):
+    def _make_complete_laya_model(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "rl_agent_config.json").write_text("{}", encoding="utf-8")
+        (path / "model.safetensors").write_bytes(b"test")
+        (path / "tokenizer").mkdir()
+        (path / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+        (path / "encoder").mkdir()
+        (path / "encoder" / "config.json").write_text("{}", encoding="utf-8")
+
+    def test_complete_laya_model_is_accepted_offline(self):
+        from maildigest.model_store import ensure_local_laya_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "laya"
+            self._make_complete_laya_model(model_dir)
+
+            resolved, repo = ensure_local_laya_model(
+                repo_id=None,
+                local_dir=model_dir,
+                offline=True,
+            )
+
+            self.assertEqual(resolved, model_dir.resolve())
+            self.assertIsNone(repo)
+
+    def test_laya_repo_mismatch_is_rejected(self):
+        from maildigest.model_store import ensure_local_laya_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "laya"
+            self._make_complete_laya_model(model_dir)
+            (model_dir / MODEL_METADATA_FILE).write_text(
+                json.dumps({"repo_id": "org/laya-a", "kind": "Laya"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(RuntimeError):
+                ensure_local_laya_model(
+                    repo_id="org/laya-b",
+                    local_dir=model_dir,
+                    offline=True,
+                )

@@ -43,6 +43,10 @@ def save_run_archive(
     save_bodies: bool,
     device: str,
     max_messages: int,
+    classifier_backend: str = "llm",
+    classifier_model_repo: str | None = None,
+    classifier_model_dir: Path | None = None,
+    classifier_fallback_count: int = 0,
 ) -> tuple[Path, dict[str, Any]]:
     """
     Save a timestamped local archive before any Gmail mutation occurs.
@@ -88,6 +92,12 @@ def save_run_archive(
         "save_bodies": save_bodies,
         "device": device,
         "max_messages": max_messages,
+        "classifier_backend": classifier_backend,
+        "classifier_model_repo": classifier_model_repo,
+        "classifier_model_dir": (
+            str(classifier_model_dir) if classifier_model_dir is not None else None
+        ),
+        "classifier_fallback_count": classifier_fallback_count,
         "files": {
             "digest_markdown": "digest.md",
             "digest_json": "digest.json",
@@ -100,6 +110,8 @@ def save_run_archive(
     digest_json["run"] = {
         "generated_at_local": local_time.isoformat(),
         "mark_read_requested": mark_read_requested,
+        "classifier_backend": classifier_backend,
+        "classifier_fallback_count": classifier_fallback_count,
     }
     digest_json["safety"]["raw_bodies_saved"] = save_bodies
     digest_json["safety"]["mailbox_mutations"] = mark_read_requested

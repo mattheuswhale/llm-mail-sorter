@@ -138,7 +138,7 @@ def markdown_digest(
 
     lines.extend([
         "---",
-        "The LLM extracts facts and writes summaries locally; priority is assigned by deterministic Python rules. Review important messages manually.",
+        "Local models extract facts and write summaries; priority is assigned by deterministic Python rules. Review important messages manually.",
         "",
     ])
     return "\n".join(lines)

@@ -16,6 +16,7 @@ VALID_CATEGORIES = {
     "account_security",
     "personal",
     "notification",
+    "server",
     "newsletter",
     "promotion",
     "other",
@@ -40,6 +41,8 @@ IMPORTANT:
 - asks_for_action means a NON-PROMOTIONAL action the user genuinely needs to take.
 - asks_for_reply means someone genuinely expects a response.
 - has_deadline means a NON-PROMOTIONAL deadline for a user action.
+- Use category "server" ONLY when the message itself clearly reports self-hosted/server/NAS/hypervisor/backup/storage/monitoring/camera infrastructure status.
+- Do NOT use "server" merely because an unrelated social post, newsletter, product update, analytics report, or app notification mentions technical/infrastructure words.
 - deadline_is_immediate means the action deadline is explicitly today,
   immediately, within 24 hours, or equivalently immediate.
 """
@@ -196,7 +199,7 @@ Return exactly one JSON object:
   "payment_problem": false,
   "account_problem": false,
   "service_outage": false,
-  "category": "work|meeting|finance|account_security|personal|notification|newsletter|promotion|other",
+  "category": "work|meeting|finance|account_security|personal|notification|server|newsletter|promotion|other",
   "deadline": null,
   "summary": "one or two short factual sentences"
 }}

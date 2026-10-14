@@ -1,0 +1,6 @@
+# Optional experimental classifier backend.
+# Install the correct PyTorch build for your machine first, then:
+#   pip install -r requirements.txt
+#   pip install -r requirements-laya.txt
+
+laya>=0.3.21,<0.4

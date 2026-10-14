@@ -63,6 +63,36 @@ OUTAGE_MARKERS = (
     "service unavailable",
 )
 
+SERVER_MARKERS = (
+    "webcam motion detected",
+    "motion detected",
+    "apt-listchanges",
+    "unraid",
+    "vzdump",
+    "backup status",
+    "backup successful",
+    "backup failed",
+    "server summary",
+    "proxmox",
+    "smartd",
+    "smart error",
+    "smart status",
+    "s.m.a.r.t.",
+    "zfs status",
+    "zfs scrub",
+    "zpool status",
+    "scrub status",
+    "array status",
+    "disk failure",
+    "disk health",
+    "ups status",
+    "ups on battery",
+    "docker host",
+    "container status",
+    "vm backup",
+    "virtual machine backup",
+)
+
 
 @dataclass(frozen=True)
 class HardSignals:
@@ -73,6 +103,7 @@ class HardSignals:
     payment_problem: bool
     account_problem: bool
     service_outage: bool
+    server_related: bool
 
 
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
@@ -82,6 +113,14 @@ def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
 def detect_hard_signals(email: EmailMessage) -> HardSignals:
     text = (
         f"{email.subject}\n{email.snippet}\n{email.body[:4000]}"
+    ).lower()
+
+    # Server detection is intentionally narrower than the other hard-signal
+    # checks. Long newsletter/social bodies can casually mention infrastructure
+    # terms; sender + subject + a short snippet are much stronger evidence that
+    # the message itself is an infrastructure notification.
+    server_text = (
+        f"{email.sender}\n{email.subject}\n{email.snippet[:500]}"
     ).lower()
 
     precedence = email.precedence.lower()
@@ -102,6 +141,7 @@ def detect_hard_signals(email: EmailMessage) -> HardSignals:
         payment_problem=_contains_any(text, PAYMENT_PROBLEM_MARKERS),
         account_problem=_contains_any(text, ACCOUNT_PROBLEM_MARKERS),
         service_outage=_contains_any(text, OUTAGE_MARKERS),
+        server_related=_contains_any(server_text, SERVER_MARKERS),
     )
 
 
@@ -112,7 +152,7 @@ def classify_priority(
     """
     Deterministic ordered rules.
 
-    The LLM extracts facts and writes the summary; it does not decide priority.
+    Local model extraction supplies facts and the summary; it does not decide priority.
     Obvious text/header evidence can override an inconsistent tiny-model signal.
     """
     hard = detect_hard_signals(email)
@@ -126,6 +166,25 @@ def classify_priority(
     account_problem = hard.account_problem or signals.account_problem
     service_outage = hard.service_outage or signals.service_outage
 
+    # A model category by itself is not enough to promote mail to HIGH/server.
+    # Small classifiers can collapse onto one label (observed with Laya choosing
+    # "server" for unrelated social/promotional mail). Only deterministic,
+    # message-level infrastructure evidence activates the server priority rule.
+    server_related = hard.server_related
+
+    # Do not leak an uncorroborated model "server" guess into the final digest.
+    # Choose a conservative fallback category from independently detected facts.
+    effective_category = signals.category
+    if effective_category == "server" and not server_related:
+        if promotion:
+            effective_category = "promotion"
+        elif newsletter:
+            effective_category = "newsletter"
+        elif automated:
+            effective_category = "notification"
+        else:
+            effective_category = "other"
+
     critical = security_issue or payment_problem or account_problem or service_outage
 
     # Critical operational/account problems override marketing/newsletter evidence.
@@ -134,8 +193,10 @@ def classify_priority(
             category = "account_security"
         elif payment_problem:
             category = "finance"
+        elif service_outage and server_related:
+            category = "server"
         else:
-            category = signals.category
+            category = effective_category
 
         return Classification(
             priority="urgent",
@@ -145,6 +206,24 @@ def classify_priority(
             summary=signals.summary,
             reason="Security, account, payment, or service problem detected.",
             rule="critical_problem",
+            signals=signals,
+        )
+
+    # Server/infrastructure mail is intentionally high even when automated or
+    # newsletter-like. Critical server failures were already escalated above.
+    if server_related:
+        return Classification(
+            priority="high",
+            category="server",
+            action_required=(
+                signals.asks_for_action
+                or signals.asks_for_reply
+                or signals.has_deadline
+            ),
+            deadline=signals.deadline,
+            summary=signals.summary,
+            reason="Server, homelab, backup, storage, monitoring, or infrastructure message detected.",
+            rule="server_related",
             signals=signals,
         )
 
@@ -170,7 +249,7 @@ def classify_priority(
     ):
         return Classification(
             priority="urgent",
-            category=signals.category,
+            category=effective_category,
             action_required=True,
             deadline=signals.deadline,
             summary=signals.summary,
@@ -183,7 +262,7 @@ def classify_priority(
     if signals.asks_for_action or signals.asks_for_reply or signals.has_deadline:
         return Classification(
             priority="high",
-            category=signals.category,
+            category=effective_category,
             action_required=True,
             deadline=signals.deadline,
             summary=signals.summary,
@@ -196,7 +275,7 @@ def classify_priority(
     if automated:
         return Classification(
             priority="low",
-            category=signals.category if signals.category != "other" else "notification",
+            category=effective_category if effective_category != "other" else "notification",
             action_required=False,
             deadline=None,
             summary=signals.summary,
@@ -208,7 +287,7 @@ def classify_priority(
     # Everything else is routine informational mail.
     return Classification(
         priority="normal",
-        category=signals.category,
+        category=effective_category,
         action_required=False,
         deadline=signals.deadline,
         summary=signals.summary,

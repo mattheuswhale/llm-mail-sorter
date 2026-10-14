@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Callable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_REPO = "Qwen/Qwen3-0.6B"
+DEFAULT_LAYA_REPO = "convaiinnovations/laya"
 MODELS_ROOT = PROJECT_ROOT / ".models"
 LEGACY_DEFAULT_MODEL_DIR = MODELS_ROOT / "Qwen3-0.6B"
 MODEL_METADATA_FILE = ".mailsort_model.json"
@@ -32,11 +34,23 @@ def _has_model_weights(path: Path) -> bool:
 
 
 def model_is_complete(path: Path) -> bool:
+    """Return True for a complete Transformers causal-LM directory."""
     return (
         path.exists()
         and (path / "config.json").exists()
         and (path / "tokenizer_config.json").exists()
         and _has_model_weights(path)
+    )
+
+
+def laya_model_is_complete(path: Path) -> bool:
+    """Return True for a complete project-local Laya checkpoint."""
+    return (
+        path.exists()
+        and (path / "rl_agent_config.json").exists()
+        and (path / "model.safetensors").exists()
+        and (path / "tokenizer" / "tokenizer_config.json").exists()
+        and (path / "encoder" / "config.json").exists()
     )
 
 
@@ -51,64 +65,69 @@ def _read_recorded_repo(path: Path) -> str | None:
     return str(repo_id) if repo_id else None
 
 
-def _write_recorded_repo(path: Path, repo_id: str) -> None:
+def _write_recorded_repo(path: Path, repo_id: str, *, kind: str) -> None:
     metadata_path = path / MODEL_METADATA_FILE
     temp_path = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
     temp_path.write_text(
-        json.dumps({"repo_id": repo_id}, indent=2),
+        json.dumps({"repo_id": repo_id, "kind": kind}, indent=2),
         encoding="utf-8",
     )
     temp_path.replace(metadata_path)
 
 
-def ensure_local_model(
+def _set_hub_offline() -> None:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+
+def _ensure_project_local_model(
     repo_id: str | None,
     local_dir: Path,
     *,
-    offline: bool = False,
+    offline: bool,
+    lock_hub_offline: bool,
+    kind: str,
+    is_complete: Callable[[Path], bool],
+    allow_patterns: list[str] | None = None,
 ) -> tuple[Path, str | None]:
-    """
-    Ensure a model is available locally.
-
-    If local_dir already contains a complete model, repo_id may be None.
-    Directories downloaded by MailSort contain .mailsort_model.json so an
-    explicitly supplied --model can be checked against the local directory.
-    Older/manual model directories remain usable with --model-dir alone and
-    are reported as local/unverified rather than being assigned a guessed repo.
-    """
     local_dir = local_dir.resolve()
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
-    if model_is_complete(local_dir):
+    # Explicit offline mode must take effect before any Hugging Face import/load.
+    if offline:
+        _set_hub_offline()
+
+    if is_complete(local_dir):
         recorded_repo = _read_recorded_repo(local_dir)
 
         if repo_id and recorded_repo and repo_id != recorded_repo:
             raise RuntimeError(
                 f"Model directory {local_dir} contains {recorded_repo}, "
-                f"but --model requested {repo_id}. Use a different --model-dir."
+                f"but the requested model is {repo_id}. Use a different model directory."
             )
 
         if repo_id and not recorded_repo:
             raise RuntimeError(
                 f"Model directory {local_dir} contains a complete but untracked model, "
                 f"so MailSort cannot verify that it is {repo_id}. "
-                "Either omit --model and use this directory as a local model, or "
-                "download the requested repository into a new/empty --model-dir."
+                "Either omit the repository ID and use this directory as a local model, "
+                "or download the requested repository into a new/empty directory."
             )
 
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        print(f"Using project-local model: {local_dir}", flush=True)
+        if lock_hub_offline:
+            _set_hub_offline()
+        print(f"Using project-local {kind} model: {local_dir}", flush=True)
         return local_dir, recorded_repo
 
     if offline:
         raise RuntimeError(
-            f"Offline mode requested, but the model is incomplete or missing at: {local_dir}"
+            f"Offline mode requested, but the {kind} model is incomplete or missing at: "
+            f"{local_dir}"
         )
 
     if not repo_id:
         raise RuntimeError(
-            f"No complete model exists at {local_dir}. "
-            "Specify --model <huggingface/repo> so it can be downloaded."
+            f"No complete {kind} model exists at {local_dir}. "
+            "Specify a Hugging Face repository so it can be downloaded."
         )
 
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -122,21 +141,83 @@ def ensure_local_model(
 
     from huggingface_hub import snapshot_download
 
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=str(local_dir),
-    )
+    kwargs: dict[str, object] = {
+        "repo_id": repo_id,
+        "local_dir": str(local_dir),
+    }
+    if allow_patterns:
+        kwargs["allow_patterns"] = allow_patterns
 
-    if not model_is_complete(local_dir):
+    snapshot_download(**kwargs)
+
+    if not is_complete(local_dir):
         raise RuntimeError(
-            f"Model download completed but required files are missing from {local_dir}"
+            f"{kind.capitalize()} model download completed but required files are missing "
+            f"from {local_dir}"
         )
 
-    _write_recorded_repo(local_dir, repo_id)
+    _write_recorded_repo(local_dir, repo_id, kind=kind)
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    print(
-        "Model download complete. Hugging Face Hub is now offline for this process.",
-        flush=True,
-    )
+    if lock_hub_offline:
+        _set_hub_offline()
+        print(
+            "Model download complete. Hugging Face Hub is now offline for this process.",
+            flush=True,
+        )
+    else:
+        print("Model download complete.", flush=True)
+
     return local_dir, repo_id
+
+
+def ensure_local_model(
+    repo_id: str | None,
+    local_dir: Path,
+    *,
+    offline: bool = False,
+    lock_hub_offline: bool = True,
+) -> tuple[Path, str | None]:
+    """
+    Ensure a causal language model is available locally.
+
+    If local_dir already contains a complete model, repo_id may be None.
+    Directories downloaded by MailSort contain .mailsort_model.json so an
+    explicitly supplied --model can be checked against the local directory.
+    Older/manual model directories remain usable with --model-dir alone and
+    are reported as local/unverified rather than being assigned a guessed repo.
+
+    lock_hub_offline=False is used only during multi-model startup, before Gmail
+    is accessed, so a second project-local model can still be downloaded.
+    """
+    return _ensure_project_local_model(
+        repo_id,
+        local_dir,
+        offline=offline,
+        lock_hub_offline=lock_hub_offline,
+        kind="LLM",
+        is_complete=model_is_complete,
+    )
+
+
+def ensure_local_laya_model(
+    repo_id: str | None,
+    local_dir: Path,
+    *,
+    offline: bool = False,
+    lock_hub_offline: bool = True,
+) -> tuple[Path, str | None]:
+    """Ensure a Laya checkpoint is available in a project-local directory."""
+    return _ensure_project_local_model(
+        repo_id,
+        local_dir,
+        offline=offline,
+        lock_hub_offline=lock_hub_offline,
+        kind="Laya",
+        is_complete=laya_model_is_complete,
+        allow_patterns=[
+            "rl_agent_config.json",
+            "model.safetensors",
+            "tokenizer/*",
+            "encoder/*",
+        ],
+    )

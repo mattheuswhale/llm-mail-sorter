@@ -7,8 +7,11 @@ from .archive import save_run_archive, update_manifest
 from .digest import make_item, sort_items
 from .gmail_client import GmailClient, authenticate_gmail
 from .model_store import (
+    DEFAULT_LAYA_REPO,
     DEFAULT_MODEL_REPO,
+    ensure_local_laya_model,
     ensure_local_model,
+    laya_model_is_complete,
     model_dir_for_repo,
     model_is_complete,
 )
@@ -73,6 +76,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--classifier",
+        choices=("llm", "laya"),
+        default="llm",
+        help=(
+            "Structured-signal classifier. 'llm' keeps the existing single-model path. "
+            "'laya' experimentally refines booleans/category with a local Laya checkpoint "
+            "while the generative model still provides summary/deadline text."
+        ),
+    )
+    parser.add_argument(
+        "--laya-model",
+        default=None,
+        help=(
+            "Hugging Face Laya repository to download when --classifier laya is used "
+            f"and the local checkpoint is missing. Defaults to {DEFAULT_LAYA_REPO}."
+        ),
+    )
+    parser.add_argument(
+        "--laya-model-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Project-local Laya checkpoint directory. If omitted, a directory is derived "
+            "from --laya-model (or the default Laya repository)."
+        ),
+    )
+    parser.add_argument(
         "--device",
         choices=("auto", "cuda", "cpu"),
         default="auto",
@@ -109,17 +139,61 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_optional_laya(args: argparse.Namespace) -> tuple[Path, str | None, str | None]:
+    """Resolve/download Laya before Gmail access, then lock the Hub offline."""
+    if args.laya_model_dir is None:
+        laya_repo = args.laya_model or DEFAULT_LAYA_REPO
+        requested_laya_dir = model_dir_for_repo(laya_repo)
+
+        # Preserve compatibility with a manually provisioned untracked directory.
+        repo_for_check = (
+            None
+            if args.laya_model is None and laya_model_is_complete(requested_laya_dir)
+            else laya_repo
+        )
+    else:
+        requested_laya_dir = args.laya_model_dir
+        repo_for_check = args.laya_model
+        if not laya_model_is_complete(requested_laya_dir) and repo_for_check is None:
+            raise SystemExit(
+                f"No complete Laya model found at {requested_laya_dir}. "
+                "Specify --laya-model <huggingface/repo> to download it."
+            )
+
+    laya_dir, recorded_laya_repo = ensure_local_laya_model(
+        repo_id=repo_for_check,
+        local_dir=requested_laya_dir,
+        offline=args.offline,
+        lock_hub_offline=True,
+    )
+    return laya_dir, recorded_laya_repo, repo_for_check
+
+
+def _release_cuda_memory() -> None:
+    """Best-effort cleanup between the LLM phase and optional Laya phase."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def main() -> None:
     args = parse_args()
 
-    # Resolve model repo/path without mixing models in the same directory.
+    # Resolve/download every model before Gmail is authenticated or email content is
+    # retrieved. In hybrid mode the Hub stays online only until both model downloads
+    # are complete, then HF_HUB_OFFLINE is enabled for the rest of the process.
     if args.model_dir is None:
         if args.model is not None:
             model_repo = args.model
             requested_model_dir = model_dir_for_repo(model_repo)
         else:
-            # Backward compatibility: older MailSort versions stored the
-            # default model in .models/Qwen3-0.6B without identity metadata.
             requested_model_dir = model_dir_for_repo(DEFAULT_MODEL_REPO)
             model_repo = (
                 None
@@ -130,19 +204,32 @@ def main() -> None:
         requested_model_dir = args.model_dir
         model_repo = args.model
 
-        # A custom existing local directory does not need --model. A missing or
-        # incomplete custom directory does, because we need to know what to download.
         if not model_is_complete(requested_model_dir) and model_repo is None:
             raise SystemExit(
                 f"No complete model found at {requested_model_dir}. "
                 "Specify --model <huggingface/repo> to download it."
             )
 
+    hybrid_mode = args.classifier == "laya"
     model_dir, recorded_model_repo = ensure_local_model(
         repo_id=model_repo,
         local_dir=requested_model_dir,
         offline=args.offline,
+        lock_hub_offline=not hybrid_mode,
     )
+
+    laya_dir: Path | None = None
+    recorded_laya_repo: str | None = None
+    requested_laya_repo: str | None = None
+    if hybrid_mode:
+        laya_dir, recorded_laya_repo, requested_laya_repo = _resolve_optional_laya(args)
+        try:
+            import laya  # noqa: F401
+        except ImportError as exc:
+            raise SystemExit(
+                "Laya classifier requested but the optional package is not installed. "
+                "Run: pip install -r requirements-laya.txt"
+            ) from exc
 
     if not args.credentials.exists():
         raise SystemExit(
@@ -165,24 +252,73 @@ def main() -> None:
     print(f"Retrieved {len(messages)} unread message(s).")
 
     items = []
+    classifier_fallback_count = 0
 
     if messages:
         from .llm import LocalLLMExtractor
 
-        extractor = LocalLLMExtractor(model_dir, device=args.device)
+        if not hybrid_mode:
+            extractor = LocalLLMExtractor(model_dir, device=args.device)
 
-        for index, email in enumerate(messages, start=1):
-            if args.show_subjects:
-                print(f"[{index}/{len(messages)}] Analyzing: {email.subject[:70]}")
-            else:
-                print(f"[{index}/{len(messages)}] Analyzing message...")
-            signals = extractor.extract(email)
-            classification = classify_priority(email, signals)
-            print(
-                f"    -> {classification.priority.upper()} "
-                f"({classification.rule})"
-            )
-            items.append(make_item(email, classification))
+            for index, email in enumerate(messages, start=1):
+                if args.show_subjects:
+                    print(f"[{index}/{len(messages)}] Analyzing: {email.subject[:70]}")
+                else:
+                    print(f"[{index}/{len(messages)}] Analyzing message...")
+                signals = extractor.extract(email)
+                classification = classify_priority(email, signals)
+                print(
+                    f"    -> {classification.priority.upper()} "
+                    f"({classification.rule})"
+                )
+                items.append(make_item(email, classification))
+        else:
+            # Phase 1: preserve the existing generative summary/deadline extraction.
+            # Laya will replace the booleans/category used by priority rules in phase 2.
+            print("Phase 1/2: extracting summaries and deadline text with the local LLM...")
+            extractor = LocalLLMExtractor(model_dir, device=args.device)
+            base_signals = []
+            for index, email in enumerate(messages, start=1):
+                if args.show_subjects:
+                    print(f"[{index}/{len(messages)}] Extracting: {email.subject[:70]}")
+                else:
+                    print(f"[{index}/{len(messages)}] Extracting message...")
+                base_signals.append(extractor.extract(email))
+
+            # Avoid requiring enough VRAM to keep both models resident simultaneously.
+            del extractor
+            _release_cuda_memory()
+
+            from .laya_classifier import LocalLayaClassifier
+
+            assert laya_dir is not None
+            print("Phase 2/2: refining structured signals with local Laya...")
+            classifier = LocalLayaClassifier(laya_dir, device=args.device)
+
+            for index, (email, base) in enumerate(
+                zip(messages, base_signals), start=1
+            ):
+                if args.show_subjects:
+                    print(f"[{index}/{len(messages)}] Classifying: {email.subject[:70]}")
+                else:
+                    print(f"[{index}/{len(messages)}] Classifying message...")
+
+                try:
+                    signals = classifier.refine(email, base)
+                except Exception as exc:
+                    classifier_fallback_count += 1
+                    signals = base
+                    print(
+                        "    WARNING: Laya classification failed for this message; "
+                        f"using LLM-extracted signals ({type(exc).__name__})"
+                    )
+
+                classification = classify_priority(email, signals)
+                print(
+                    f"    -> {classification.priority.upper()} "
+                    f"({classification.rule})"
+                )
+                items.append(make_item(email, classification))
 
         items = sort_items(items)
 
@@ -198,6 +334,14 @@ def main() -> None:
         save_bodies=args.save_bodies,
         device=args.device,
         max_messages=args.max_messages,
+        classifier_backend=args.classifier,
+        classifier_model_repo=(
+            recorded_laya_repo or requested_laya_repo or "local/unknown"
+            if hybrid_mode
+            else None
+        ),
+        classifier_model_dir=laya_dir if hybrid_mode else None,
+        classifier_fallback_count=classifier_fallback_count,
     )
 
     print(f"Saved timestamped run archive: {run_dir}")
@@ -205,6 +349,12 @@ def main() -> None:
     print(f"  - {run_dir / 'digest.json'}")
     print(f"  - {run_dir / 'processed_messages.json'}")
     print(f"  - {run_dir / 'manifest.json'}")
+
+    if hybrid_mode and classifier_fallback_count:
+        print(
+            f"Laya fallback count: {classifier_fallback_count} message(s) used the "
+            "original LLM-extracted structured signals."
+        )
 
     if args.mark_read and messages:
         # Persist an "attempting" state before touching Gmail. If the process

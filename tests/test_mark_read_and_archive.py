@@ -183,6 +183,9 @@ class ArchiveTests(unittest.TestCase):
             self.assertTrue((run_dir / "manifest.json").exists())
             self.assertEqual(manifest["mark_read_status"], "pending")
             self.assertFalse(manifest["save_bodies"])
+            self.assertEqual(manifest["classifier_backend"], "llm")
+            self.assertIsNone(manifest["classifier_model_repo"])
+            self.assertEqual(manifest["classifier_fallback_count"], 0)
 
             processed = json.loads(
                 (run_dir / "processed_messages.json").read_text(encoding="utf-8")
